@@ -55,6 +55,36 @@ is a cheap validation against our own retention data (Phase 2). If no signal
 - Python ≥ 3.11, `torch>=2.5.1,<2.7`, `numpy==2.2.6`, `ffmpeg`, `uv` (WhisperX
   is run through `uvx`).
 
+### 3.2a Compute decision: pay-per-use → **Modal** (decided)
+
+| | Modal (chosen) | RunPod pod | Colab Pro |
+|---|---|---|---|
+| Billing | Per second, **only while a video is processing**; scales to zero | Per hour **while the pod is on**, even when idle | Monthly units |
+| Free allowance | $30/month credit on the Starter plan | None | — |
+| Price (Oct 2026, verify at checkout) | L40S ≈ $1.95/h, L4 ≈ $0.80/h, A100-80GB ≈ $2.10–2.50/h, plus a small CPU/RAM charge | L4/A40 ≈ $0.35–0.45/h, A100 ≈ $1.19–1.39/h | — |
+| Reuse for Phase 3 web app | **Same function becomes the API**; no rewrite | Must rebuild as a service | Not deployable |
+| Failure mode | Cold start reloads weights (mitigated: `tribe-cache` Volume) | Forgetting to stop the pod burns money | Session dies, dependency resets |
+
+Why Modal wins on effort vs. output:
+- The $30 credit likely covers all of Phase 0–2: about 15 L40S hours.
+- No idle-billing risk.
+- The Phase 0 code is already the Phase 3 backend.
+
+RunPod is cheaper per hour but only pays off at sustained, high volume, which we
+don't have evidence for yet.
+
+GPU choice: start on **L40S (48 GB)** so the first run can't fail on memory.
+`run_stats.json` records peak VRAM. If it is under ~20 GB, switch `GPU = "L4"`
+in `tribe_modal.py` and cut cost by about 60%.
+
+**Cost per video = `gpu_seconds_per_video_minute` (measured in Phase 0) × video
+minutes × GPU $/s.** That number isn't known yet. Phase 0 exists to measure it.
+
+Data note: uploaded videos are processed on Modal's cloud and cached in the
+`tribe-cache` volume. For unreleased marketing content, check that this is
+acceptable under company policy. Delete cached inputs with
+`modal volume rm tribe-cache inputs -r`.
+
 ### 3.3 Input constraints (from code)
 - Video formats: `.mp4 .avi .mkv .mov .webm`; audio: `.wav .mp3 .flac .ogg`.
 - Output resolution: **1 prediction per second**. A 30 s reel gives 30 rows,
@@ -94,7 +124,39 @@ Don't use it for absolute scores. Comparing two inputs under the same model
 cancels much of the model's bias, so it is the use the evidence can best
 support.
 
-## 5. Setup — Phase 0 (step by step)
+## 5. Setup — Phase 0 on Modal (recommended, ~30 min)
+
+Script: [`tribe_modal.py`](../tribe_modal.py). It was import-checked and linted
+but **has not run on a GPU yet**. The first run is the test.
+
+1. Hugging Face: create a **read** token. For `--mode full`, also request
+   access at `https://huggingface.co/meta-llama/Llama-3.2-3B`.
+2. Modal: sign up at modal.com, then on your laptop:
+   ```bash
+   pip install modal
+   modal setup                                         # browser login
+   modal secret create huggingface HF_TOKEN=hf_xxx     # your HF token
+   ```
+3. Run on one short video (30–90 s) first:
+   ```bash
+   modal run tribe_modal.py --video my_video.mp4 --mode av
+   ```
+   - `--mode av` = video + audio, any language, no Llama needed (**start here**)
+   - `--mode full` = adds the English transcript and Llama text features
+   - `--mode video` = visuals only (thumbnail-style)
+4. The first run is slow because it builds the image and downloads weights and
+   the HCP atlas into the volume. **Run the same command a second time.** Use
+   that second `run_stats.json` for cost numbers, since the first includes
+   one-off downloads.
+5. Outputs land in `outputs/<video>-<mode>/`: `timeline.png`,
+   `groups_per_second.csv`, `roi_per_second.csv`, `preds.npy`,
+   `run_stats.json`.
+
+What to look at: in `timeline.png`, do the brain-region lines differ from the
+dashed loudness/motion baselines? If they only mirror the baselines, the model
+adds nothing for this video.
+
+## 5b. Fallback — Phase 0 on Colab (step by step)
 
 1. Create a HF account → Settings → Access Tokens → create a **read** token.
 2. Open `https://huggingface.co/meta-llama/Llama-3.2-3B` → accept the licence
@@ -135,8 +197,7 @@ support.
 4. **Ground truth we own:** do we have per-second retention data (YouTube
    Studio / Meta Ads export) for ≥20 past videos? Without it, Phase 2 cannot
    happen.
-5. **Compute budget:** Colab Pro (~$10/mo) vs a pay-per-use cloud GPU vs a
-   company GPU box?
+5. ~~Compute budget~~ → **Decided: pay-per-use, Modal** (see 3.2a).
 6. **Users:** just you, or a team? This decides whether Phase 3 is needed.
 7. **Licence:** has legal seen CC BY-NC 4.0 for this use?
 
